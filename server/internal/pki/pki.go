@@ -30,8 +30,9 @@ import (
 
 	nClient "github.com/katzenpost/katzenpost/authority/nonvoting/client"
 	vClient "github.com/katzenpost/katzenpost/authority/voting/client"
+	"github.com/katzenpost/katzenpost/core/crypto/cert"
 	"github.com/katzenpost/katzenpost/core/crypto/ecdh"
-	"github.com/katzenpost/katzenpost/core/crypto/eddsa"
+	"github.com/katzenpost/katzenpost/core/crypto/pem"
 	"github.com/katzenpost/katzenpost/core/epochtime"
 	cpki "github.com/katzenpost/katzenpost/core/pki"
 	sConstants "github.com/katzenpost/katzenpost/core/sphinx/constants"
@@ -201,7 +202,7 @@ func (p *pki) worker() {
 				continue
 			}
 
-			ent, err := pkicache.New(d, p.glue.IdentityKey().PublicKey(), p.glue.Config().Server.IsProvider)
+			ent, err := pkicache.New(d, p.glue.IdentityPublicKey(), p.glue.Config().Server.IsProvider)
 			if err != nil {
 				p.log.Warningf("Failed to generate PKI cache for epoch %v: %v", epoch, err)
 				p.setFailedFetch(epoch, err)
@@ -285,7 +286,7 @@ func (p *pki) validateCacheEntry(ent *pkicache.Entry) error {
 	if desc.Name != p.glue.Config().Server.Identifier {
 		return fmt.Errorf("self Name field does not match Identifier")
 	}
-	if !desc.IdentityKey.Equal(p.glue.IdentityKey().PublicKey()) {
+	if !desc.IdentityKey.Equal(p.glue.IdentityPublicKey()) {
 		return fmt.Errorf("self identity key mismatch")
 	}
 	if !desc.LinkKey.Equal(p.glue.LinkKey().PublicKey()) {
@@ -386,7 +387,7 @@ func (p *pki) publishDescriptorIfNeeded(pkiCtx context.Context) error {
 	// Generate the non-key parts of the descriptor.
 	desc := &cpki.MixDescriptor{
 		Name:        p.glue.Config().Server.Identifier,
-		IdentityKey: p.glue.IdentityKey().PublicKey(),
+		IdentityKey: p.glue.IdentityPublicKey(),
 		LinkKey:     p.glue.LinkKey().PublicKey(),
 		Addresses:   p.descAddrMap,
 	}
@@ -443,7 +444,7 @@ func (p *pki) publishDescriptorIfNeeded(pkiCtx context.Context) error {
 	}
 
 	// Post the descriptor to all the authorities.
-	err := p.impl.Post(pkiCtx, doPublishEpoch, p.glue.IdentityKey(), desc)
+	err := p.impl.Post(pkiCtx, doPublishEpoch, p.glue.IdentityKey(), p.glue.IdentityPublicKey(), desc)
 	switch err {
 	case nil:
 		p.log.Debugf("Posted descriptor for epoch: %v", doPublishEpoch)
@@ -625,7 +626,7 @@ func (p *pki) OutgoingDestinations() map[[sConstants.NodeIDLength]byte]*cpki.Mix
 		}
 
 		for _, v := range d.Outgoing() {
-			nodeID := v.IdentityKey.ByteArray()
+			nodeID := v.IdentityKey.Sum256()
 
 			// Ignore nodes from past epochs that are not listed in the
 			// current document.
@@ -697,20 +698,25 @@ func New(glue glue.Glue) (glue.PKI, error) {
 	}
 
 	if glue.Config().PKI.Nonvoting != nil {
-		authPk := new(eddsa.PublicKey)
-		if err = authPk.FromString(glue.Config().PKI.Nonvoting.PublicKey); err != nil {
-			return nil, fmt.Errorf("BUG: pki: Failed to deserialize validated public key: %v", err)
+		_, authPk := cert.Scheme.NewKeypair()
+		identityKeyPemFile := filepath.Join(glue.Config().Server.DataDir,
+			glue.Config().PKI.Nonvoting.PublicKeyPem)
+		err := pem.FromFile(identityKeyPemFile, authPk)
+		if err != nil {
+			return nil, fmt.Errorf("BUG: pki: Failed to deserialize validated public identity key from PEM file: %v", err)
 		}
-		authPubKey, err := wire.NewScheme().PublicKeyFromPemFile(filepath.Join(glue.Config().Server.DataDir, glue.Config().PKI.Nonvoting.LinkPublicKeyPem))
+
+		wirePemFile := filepath.Join(glue.Config().Server.DataDir, glue.Config().PKI.Nonvoting.LinkPublicKeyPem)
+		authPubKey, err := wire.NewScheme().PublicKeyFromPemFile(wirePemFile)
 		if err != nil {
 			return nil, err
 		}
 		pkiCfg := &nClient.Config{
-			AuthorityLinkKey: authPubKey,
-			LinkKey:          glue.LinkKey(),
-			LogBackend:       glue.LogBackend(),
-			Address:          glue.Config().PKI.Nonvoting.Address,
-			PublicKey:        authPk,
+			AuthorityLinkKey:     authPubKey,
+			LinkKey:              glue.LinkKey(),
+			LogBackend:           glue.LogBackend(),
+			Address:              glue.Config().PKI.Nonvoting.Address,
+			AuthorityIdentityKey: authPk,
 		}
 		p.impl, err = nClient.New(pkiCfg)
 		if err != nil {

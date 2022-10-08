@@ -24,8 +24,15 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/katzenpost/katzenpost/core/crypto/eddsa"
+	"gitlab.com/yawning/aez.git"
+	"golang.org/x/crypto/blake2b"
+	"gopkg.in/eapache/channels.v1"
+	"gopkg.in/op/go-logging.v1"
+
+	"github.com/katzenpost/katzenpost/core/crypto/cert"
+	"github.com/katzenpost/katzenpost/core/crypto/pem"
 	"github.com/katzenpost/katzenpost/core/crypto/rand"
+	"github.com/katzenpost/katzenpost/core/crypto/sign"
 	"github.com/katzenpost/katzenpost/core/log"
 	"github.com/katzenpost/katzenpost/core/thwack"
 	"github.com/katzenpost/katzenpost/core/utils"
@@ -40,9 +47,6 @@ import (
 	"github.com/katzenpost/katzenpost/server/internal/pki"
 	"github.com/katzenpost/katzenpost/server/internal/provider"
 	"github.com/katzenpost/katzenpost/server/internal/scheduler"
-	"gitlab.com/yawning/aez.git"
-	"gopkg.in/eapache/channels.v1"
-	"gopkg.in/op/go-logging.v1"
 )
 
 // ErrGenerateOnly is the error returned when the server initialization
@@ -53,8 +57,9 @@ var ErrGenerateOnly = errors.New("server: GenerateOnly set")
 type Server struct {
 	cfg *config.Config
 
-	identityKey *eddsa.PrivateKey
-	linkKey     wire.PrivateKey
+	identityPrivateKey sign.PrivateKey
+	identityPublicKey  sign.PublicKey
+	linkKey            wire.PrivateKey
 
 	logBackend *log.Backend
 	log        *logging.Logger
@@ -101,8 +106,8 @@ func (s *Server) reshadowCryptoWorkers() {
 }
 
 // IdentityKey returns the running server's identity public key.
-func (s *Server) IdentityKey() *eddsa.PublicKey {
-	return s.identityKey.PublicKey()
+func (s *Server) IdentityKey() sign.PublicKey {
+	return s.identityPublicKey
 }
 
 // RotateLog rotates the log file
@@ -204,7 +209,8 @@ func (s *Server) halt() {
 		s.inboundPackets.Close()
 	}
 	s.linkKey.Reset()
-	s.identityKey.Reset()
+	s.identityPrivateKey.Reset()
+	s.identityPublicKey.Reset()
 	close(s.fatalErrCh)
 
 	s.log.Noticef("Shutdown complete.")
@@ -231,9 +237,6 @@ func New(cfg *config.Config) (*Server, error) {
 	instrument.Init()
 
 	s.log.Notice("Katzenpost is still pre-alpha.  DO NOT DEPEND ON IT FOR STRONG SECURITY OR ANONYMITY.")
-	if s.cfg.Debug.IsUnsafe() {
-		s.log.Warning("Unsafe Debug configuration options are set.")
-	}
 	if s.cfg.Logging.Level == "DEBUG" {
 		s.log.Warning("Unsafe Debug logging is enabled.")
 	}
@@ -245,27 +248,44 @@ func New(cfg *config.Config) (*Server, error) {
 	s.log.Noticef("Server identifier is: '%v'", s.cfg.Server.Identifier)
 
 	// Initialize the server identity and link keys.
-	var err error
-	if s.cfg.Debug.IdentityKey != nil {
-		s.log.Warning("IdentityKey should NOT be used for production deployments.")
-		s.identityKey = new(eddsa.PrivateKey)
-		s.identityKey.FromBytes(s.cfg.Debug.IdentityKey.Bytes())
-	} else {
-		identityPrivateKeyFile := filepath.Join(s.cfg.Server.DataDir, "identity.private.pem")
-		identityPublicKeyFile := filepath.Join(s.cfg.Server.DataDir, "identity.public.pem")
-		if s.identityKey, err = eddsa.Load(identityPrivateKeyFile, identityPublicKeyFile, rand.Reader); err != nil {
-			s.log.Errorf("Failed to initialize identity: %v", err)
+	identityPrivateKeyFile := filepath.Join(s.cfg.Server.DataDir, "identity.private.pem")
+	identityPublicKeyFile := filepath.Join(s.cfg.Server.DataDir, "identity.public.pem")
+
+	s.identityPrivateKey, s.identityPublicKey = cert.Scheme.NewKeypair()
+
+	if pem.BothExists(identityPrivateKeyFile, identityPublicKeyFile) {
+		err := pem.FromFile(identityPrivateKeyFile, s.identityPrivateKey)
+		if err != nil {
 			return nil, err
 		}
+		err = pem.FromFile(identityPublicKeyFile, s.identityPublicKey)
+		if err != nil {
+			return nil, err
+		}
+	} else if pem.BothNotExists(identityPrivateKeyFile, identityPublicKeyFile) {
+		err := pem.ToFile(identityPrivateKeyFile, s.identityPrivateKey)
+		if err != nil {
+			return nil, err
+		}
+		err = pem.ToFile(identityPublicKeyFile, s.identityPublicKey)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		return nil, fmt.Errorf("%s and %s must either both exist or not exist", identityPrivateKeyFile, identityPublicKeyFile)
 	}
-	s.log.Noticef("Server identity public key is: %s", s.identityKey.PublicKey())
+
+	var err error
+	idPubKeyHash := s.identityPublicKey.Sum256()
+	s.log.Noticef("Server identity public key is: %x", idPubKeyHash[:])
 	linkKeyFile := filepath.Join(s.cfg.Server.DataDir, "link.private.pem")
 	scheme := wire.NewScheme()
 	if s.linkKey, err = scheme.Load(linkKeyFile, "", rand.Reader); err != nil {
 		s.log.Errorf("Failed to initialize link key: %v", err)
 		return nil, err
 	}
-	s.log.Noticef("Server link public key is: %s", s.linkKey.PublicKey())
+	linkPubKeyHash := blake2b.Sum256(s.linkKey.PublicKey().Bytes())
+	s.log.Noticef("Server link public key is: %x", linkPubKeyHash[:])
 
 	if s.cfg.Debug.GenerateOnly {
 		return nil, ErrGenerateOnly
@@ -404,8 +424,12 @@ func (g *serverGlue) LogBackend() *log.Backend {
 	return g.s.logBackend
 }
 
-func (g *serverGlue) IdentityKey() *eddsa.PrivateKey {
-	return g.s.identityKey
+func (g *serverGlue) IdentityKey() sign.PrivateKey {
+	return g.s.identityPrivateKey
+}
+
+func (g *serverGlue) IdentityPublicKey() sign.PublicKey {
+	return g.s.identityPublicKey
 }
 
 func (g *serverGlue) LinkKey() wire.PrivateKey {
