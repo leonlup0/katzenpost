@@ -17,12 +17,13 @@
 package server
 
 import (
+	"crypto/hmac"
 	"net"
 	"time"
 
 	"github.com/katzenpost/katzenpost/authority/internal/s11n"
-	"github.com/katzenpost/katzenpost/core/crypto/eddsa"
 	"github.com/katzenpost/katzenpost/core/crypto/rand"
+	"github.com/katzenpost/katzenpost/core/crypto/sign"
 	"github.com/katzenpost/katzenpost/core/epochtime"
 	"github.com/katzenpost/katzenpost/core/sphinx"
 	"github.com/katzenpost/katzenpost/core/wire"
@@ -45,10 +46,11 @@ func (s *Server) onConn(conn net.Conn) {
 
 	// Initialize the wire protocol session.
 	auth := &wireAuthenticator{s: s}
+	keyHash := s.identityPublicKey.Sum256()
 	cfg := &wire.SessionConfig{
 		Geometry:          sphinx.DefaultGeometry(),
 		Authenticator:     auth,
-		AdditionalData:    s.identityKey.PublicKey().Bytes(),
+		AdditionalData:    keyHash[:],
 		AuthenticationKey: s.linkKey,
 		RandomReader:      rand.Reader,
 	}
@@ -80,13 +82,13 @@ func (s *Server) onConn(conn net.Conn) {
 	case *commands.GetConsensus:
 		resp = s.onGetConsensus(rAddr, c)
 	case *commands.PostDescriptor:
-		if auth.peerIdentityKey == nil {
+		if auth.peerIdentityKeyHash == nil {
 			// A client trying to post is actively evil, don't even dignify
 			// it with a response.
 			s.log.Errorf("Peer %v: Not allowed to post.", rAddr)
 			return
 		}
-		resp = s.onPostDescriptor(rAddr, c, auth.peerIdentityKey)
+		resp = s.onPostDescriptor(rAddr, c, auth.peerIdentityKeyHash)
 	default:
 		s.log.Debugf("Peer %v: Invalid request: %T", rAddr, c)
 		return
@@ -120,7 +122,7 @@ func (s *Server) onGetConsensus(rAddr net.Addr, cmd *commands.GetConsensus) comm
 	return resp
 }
 
-func (s *Server) onPostDescriptor(rAddr net.Addr, cmd *commands.PostDescriptor, pubKey *eddsa.PublicKey) commands.Command {
+func (s *Server) onPostDescriptor(rAddr net.Addr, cmd *commands.PostDescriptor, pubKeyHash []byte) commands.Command {
 	resp := &commands.PostDescriptorStatus{
 		ErrorCode: commands.DescriptorInvalid,
 	}
@@ -140,22 +142,29 @@ func (s *Server) onPostDescriptor(rAddr net.Addr, cmd *commands.PostDescriptor, 
 	}
 
 	// Validate and deserialize the descriptor.
-	desc, err := s11n.VerifyAndParseDescriptor(pubKey, cmd.Payload, cmd.Epoch)
+	verifier, err := s11n.GetVerifierFromDescriptor(cmd.Payload)
+	if err != nil {
+		s.log.Errorf("Peer %v: Invalid descriptor: %v", rAddr, err)
+		return resp
+	}
+	desc, err := s11n.VerifyAndParseDescriptor(verifier, cmd.Payload, cmd.Epoch)
 	if err != nil {
 		s.log.Errorf("Peer %v: Invalid descriptor: %v", rAddr, err)
 		return resp
 	}
 
 	// Ensure that the descriptor is signed by the peer that is posting.
-	if !desc.IdentityKey.Equal(pubKey) {
-		s.log.Errorf("Peer %v: Identity key '%v' is not link key '%v'.", rAddr, desc.IdentityKey, pubKey)
+	idPubKeyHash := desc.IdentityKey.Sum256()
+	if !hmac.Equal(idPubKeyHash[:], pubKeyHash) {
+		s.log.Errorf("Peer %v: Identity key hash '%x' is not id key hash '%x'.", rAddr, idPubKeyHash[:], pubKeyHash)
 		resp.ErrorCode = commands.DescriptorForbidden
 		return resp
 	}
 
 	// Ensure that the descriptor is from an allowed peer.
 	if !s.state.isDescriptorAuthorized(desc) {
-		s.log.Errorf("Peer %v: Identity key '%v' not authorized", rAddr, desc.IdentityKey)
+		identityKeyHash := desc.IdentityKey.Sum256()
+		s.log.Errorf("Peer %v: Identity key hash '%x' not authorized", rAddr, identityKeyHash[:])
 		resp.ErrorCode = commands.DescriptorForbidden
 		return resp
 	}
@@ -179,8 +188,8 @@ func (s *Server) onPostDescriptor(rAddr net.Addr, cmd *commands.PostDescriptor, 
 }
 
 type wireAuthenticator struct {
-	s               *Server
-	peerIdentityKey *eddsa.PublicKey
+	s                   *Server
+	peerIdentityKeyHash []byte
 }
 
 func (a *wireAuthenticator) IsPeerValid(creds *wire.PeerCredentials) bool {
@@ -188,19 +197,17 @@ func (a *wireAuthenticator) IsPeerValid(creds *wire.PeerCredentials) bool {
 	switch len(creds.AdditionalData) {
 	case 0:
 		return true
-	case eddsa.PublicKeySize:
+	case sign.PublicKeyHashSize:
 	default:
 		a.s.log.Debugf("Rejecting authentication, invalid AD size.")
 		return false
 	}
 
-	a.peerIdentityKey = new(eddsa.PublicKey)
-	if err := a.peerIdentityKey.FromBytes(creds.AdditionalData); err != nil {
-		a.s.log.Debugf("Rejecting authentication, invalid AD: %v", err)
-		return false
-	}
+	a.peerIdentityKeyHash = creds.AdditionalData
 
-	pk := a.peerIdentityKey.ByteArray()
+	pk := [sign.PublicKeyHashSize]byte{}
+	copy(pk[:], creds.AdditionalData[:sign.PublicKeyHashSize])
+
 	if !(a.s.state.authorizedMixes[pk] || a.s.state.authorizedProviders[pk] != "") {
 		a.s.log.Debugf("Rejecting authentication, not a valid mix/provider.")
 		return false

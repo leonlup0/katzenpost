@@ -28,7 +28,8 @@ import (
 	"github.com/BurntSushi/toml"
 	"golang.org/x/net/idna"
 
-	"github.com/katzenpost/katzenpost/core/crypto/eddsa"
+	"github.com/katzenpost/katzenpost/core/crypto/cert"
+	"github.com/katzenpost/katzenpost/core/crypto/pem"
 	"github.com/katzenpost/katzenpost/core/crypto/rand"
 	"github.com/katzenpost/katzenpost/core/utils"
 )
@@ -56,6 +57,8 @@ const (
 	defaultLambdaDMaxPercentile = 0.99999
 	defaultLambdaM              = 0.00025
 	defaultLambdaMMaxPercentile = 0.99999
+
+	publicKeyHashSize = 32 // blake2b.Sum256
 )
 
 var defaultLogging = Logging{
@@ -278,8 +281,8 @@ type Node struct {
 	// the node is a Provider.
 	Identifier string
 
-	// IdentityKey is the node's identity signing key.
-	IdentityKey *eddsa.PublicKey
+	// IdentityKeyPem is the node's identity signing key pem file path.
+	IdentityKeyPem string
 }
 
 func (n *Node) validate(isProvider bool) error {
@@ -297,8 +300,8 @@ func (n *Node) validate(isProvider bool) error {
 	} else if n.Identifier != "" {
 		return fmt.Errorf("config: %v: Node has Identifier set", section)
 	}
-	if n.IdentityKey == nil {
-		return fmt.Errorf("config: %v: Node is missing IdentityKey", section)
+	if n.IdentityKeyPem == "" {
+		return fmt.Errorf("config: %v: Node is missing IdentityKeyPem", section)
 	}
 	return nil
 }
@@ -366,14 +369,18 @@ func (cfg *Config) FixupAndValidate() error {
 		idMap[v.Identifier] = v
 		allNodes = append(allNodes, v)
 	}
-	pkMap := make(map[[eddsa.PublicKeySize]byte]*Node)
+	pkMap := make(map[[publicKeyHashSize]byte]*Node)
 	for _, v := range allNodes {
-		var tmp [eddsa.PublicKeySize]byte
-		copy(tmp[:], v.IdentityKey.Bytes())
-		if _, ok := pkMap[tmp]; ok {
-			return fmt.Errorf("config: Nodes: IdentityKey '%v' is present more than once", v.IdentityKey)
+		_, idkey := cert.Scheme.NewKeypair()
+		err := pem.FromFile(filepath.Join(cfg.Authority.DataDir, v.IdentityKeyPem), idkey)
+		if err != nil {
+			return err
 		}
-		pkMap[tmp] = v
+		idKeyHash := idkey.Sum256()
+		if _, ok := pkMap[idKeyHash]; ok {
+			return fmt.Errorf("config: Nodes: IdentityKey '%v' is present more than once", v.IdentityKeyPem)
+		}
+		pkMap[idKeyHash] = v
 	}
 
 	return nil

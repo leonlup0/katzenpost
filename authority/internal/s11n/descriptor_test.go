@@ -22,8 +22,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/katzenpost/katzenpost/core/crypto/cert"
 	"github.com/katzenpost/katzenpost/core/crypto/ecdh"
-	"github.com/katzenpost/katzenpost/core/crypto/eddsa"
 	"github.com/katzenpost/katzenpost/core/crypto/rand"
 	"github.com/katzenpost/katzenpost/core/pki"
 	"github.com/katzenpost/katzenpost/core/wire"
@@ -49,10 +49,9 @@ func TestDescriptor(t *testing.T) {
 	}
 	d.Layer = pki.LayerProvider
 	d.LoadWeight = 23
-	identityPriv, err := eddsa.NewKeypair(rand.Reader)
-	require.NoError(err, "eddsa.NewKeypair()")
-	d.IdentityKey = identityPriv.PublicKey()
-	scheme := wire.NewScheme()
+	identityPriv, identityPub := cert.Scheme.NewKeypair()
+	d.IdentityKey = identityPub
+	scheme := wire.DefaultScheme
 	linkPriv := scheme.GenerateKeypair(rand.Reader)
 	d.LinkKey = linkPriv.PublicKey()
 	d.MixKeys = make(map[uint64]*ecdh.PublicKey)
@@ -78,7 +77,7 @@ func TestDescriptor(t *testing.T) {
 	t.Logf("signed descriptor: '%v'", signed)
 
 	// Verify and deserialize the signed descriptor.
-	dd, err := VerifyAndParseDescriptor(identityPriv.PublicKey(), signed, debugTestEpoch)
+	dd, err := VerifyAndParseDescriptor(identityPub, signed, debugTestEpoch)
 	require.NoError(err)
 
 	t.Logf("Deserialized descriptor: '%v'", dd)

@@ -22,8 +22,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/katzenpost/katzenpost/core/crypto/cert"
 	"github.com/katzenpost/katzenpost/core/crypto/ecdh"
-	"github.com/katzenpost/katzenpost/core/crypto/eddsa"
 	"github.com/katzenpost/katzenpost/core/pki"
 	"github.com/katzenpost/katzenpost/core/wire"
 	"github.com/stretchr/testify/assert"
@@ -38,10 +38,9 @@ func genDescriptor(require *require.Assertions, idx int, layer int) (*pki.MixDes
 	}
 	d.Layer = uint8(layer)
 	d.LoadWeight = 23
-	identityPriv, err := eddsa.NewKeypair(rand.Reader)
-	require.NoError(err, "eddsa.NewKeypair()")
-	d.IdentityKey = identityPriv.PublicKey()
-	scheme := wire.NewScheme()
+	identityPriv, identityPub := cert.Scheme.NewKeypair()
+	d.IdentityKey = identityPub
+	scheme := wire.DefaultScheme
 	linkPriv := scheme.GenerateKeypair(rand.Reader)
 	d.LinkKey = linkPriv.PublicKey()
 	d.MixKeys = make(map[uint64]*ecdh.PublicKey)
@@ -57,7 +56,7 @@ func genDescriptor(require *require.Assertions, idx int, layer int) (*pki.MixDes
 			"miauCount": idx,
 		}
 	}
-	err = IsDescriptorWellFormed(d, debugTestEpoch)
+	err := IsDescriptorWellFormed(d, debugTestEpoch)
 	require.NoError(err, "IsDescriptorWellFormed(good)")
 
 	signed, err := SignDescriptor(identityPriv, d)
@@ -71,8 +70,7 @@ func TestDocument(t *testing.T) {
 	require := require.New(t)
 
 	// Generate a random signing key.
-	k, err := eddsa.NewKeypair(rand.Reader)
-	require.NoError(err, "eddsa.NewKeypair()")
+	k, idPub := cert.Scheme.NewKeypair()
 
 	testSendRate := uint64(3)
 	sharedRandomCommit := make([]byte, SharedRandomLength)
@@ -110,7 +108,7 @@ func TestDocument(t *testing.T) {
 	require.NoError(err, "SignDocument()")
 
 	// Validate and deserialize.
-	ddoc, err := VerifyAndParseDocument([]byte(signed), k.PublicKey())
+	ddoc, err := VerifyAndParseDocument([]byte(signed), idPub)
 	require.NoError(err, "VerifyAndParseDocument()")
 	require.Equal(doc.Epoch, ddoc.Epoch, "VerifyAndParseDocument(): Epoch")
 	require.Equal(doc.SendRatePerMinute, testSendRate, "VerifyAndParseDocument(): SendRatePerMinute")

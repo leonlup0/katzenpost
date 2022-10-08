@@ -18,15 +18,14 @@
 package client
 
 import (
-	"bytes"
 	"context"
-	"encoding/hex"
+	"crypto/hmac"
 	"fmt"
 	"net"
 
 	"github.com/katzenpost/katzenpost/authority/internal/s11n"
-	"github.com/katzenpost/katzenpost/core/crypto/eddsa"
 	"github.com/katzenpost/katzenpost/core/crypto/rand"
+	"github.com/katzenpost/katzenpost/core/crypto/sign"
 	"github.com/katzenpost/katzenpost/core/log"
 	"github.com/katzenpost/katzenpost/core/pki"
 	"github.com/katzenpost/katzenpost/core/sphinx"
@@ -48,7 +47,7 @@ type Config struct {
 	Address string
 
 	// PublicKey is the authority's public key to use when validating documents.
-	PublicKey *eddsa.PublicKey
+	AuthorityIdentityKey sign.PublicKey
 
 	// AuthorityLinkKey is the authority's link key used in our noise wire protocol.
 	AuthorityLinkKey wire.PublicKey
@@ -65,8 +64,8 @@ func (cfg *Config) validate() error {
 	if cfg.LogBackend == nil {
 		return fmt.Errorf("nonvoting/client: LogBackend is mandatory")
 	}
-	if cfg.PublicKey == nil {
-		return fmt.Errorf("nonvoting/client: PublicKey is mandatory")
+	if cfg.AuthorityIdentityKey == nil {
+		return fmt.Errorf("nonvoting/client: AuthorityIdentityKeyPublicKey is mandatory")
 	}
 	return nil
 }
@@ -78,8 +77,8 @@ type client struct {
 	serverLinkKey wire.PublicKey
 }
 
-func (c *client) Post(ctx context.Context, epoch uint64, signingKey *eddsa.PrivateKey, d *pki.MixDescriptor) error {
-	c.log.Debugf("Post(ctx, %d, %v, %+v)", epoch, signingKey.PublicKey(), d)
+func (c *client) Post(ctx context.Context, epoch uint64, signingPrivateKey sign.PrivateKey, signingPublicKey sign.PublicKey, d *pki.MixDescriptor) error {
+	c.log.Debugf("Post(ctx, %d, %v, %+v)", epoch, signingPublicKey, d)
 
 	// Ensure that the descriptor we are about to post is well formed.
 	if err := s11n.IsDescriptorWellFormed(d, epoch); err != nil {
@@ -87,7 +86,7 @@ func (c *client) Post(ctx context.Context, epoch uint64, signingKey *eddsa.Priva
 	}
 
 	// Make a serialized + signed + serialized descriptor.
-	signed, err := s11n.SignDescriptor(signingKey, d)
+	signed, err := s11n.SignDescriptor(signingPrivateKey, d)
 	if err != nil {
 		return err
 	}
@@ -96,7 +95,7 @@ func (c *client) Post(ctx context.Context, epoch uint64, signingKey *eddsa.Priva
 	// Initialize the TCP/IP connection, and wire session.
 	doneCh := make(chan interface{})
 	defer close(doneCh)
-	conn, s, err := c.initSession(ctx, doneCh, signingKey.PublicKey(), c.cfg.LinkKey)
+	conn, s, err := c.initSession(ctx, doneCh, signingPublicKey, c.cfg.LinkKey)
 	if err != nil {
 		return err
 	}
@@ -174,7 +173,7 @@ func (c *client) Get(ctx context.Context, epoch uint64) (*pki.Document, []byte, 
 	}
 
 	// Validate the document.
-	doc, err := s11n.VerifyAndParseDocument(r.Payload, c.cfg.PublicKey)
+	doc, err := s11n.VerifyAndParseDocument(r.Payload, c.cfg.AuthorityIdentityKey)
 	if err != nil {
 		return nil, nil, err
 	} else if doc.Epoch != epoch {
@@ -187,10 +186,10 @@ func (c *client) Get(ctx context.Context, epoch uint64) (*pki.Document, []byte, 
 }
 
 func (c *client) Deserialize(raw []byte) (*pki.Document, error) {
-	return s11n.VerifyAndParseDocument(raw, c.cfg.PublicKey)
+	return s11n.VerifyAndParseDocument(raw, c.cfg.AuthorityIdentityKey)
 }
 
-func (c *client) initSession(ctx context.Context, doneCh <-chan interface{}, signingKey *eddsa.PublicKey, linkKey wire.PrivateKey) (net.Conn, *wire.Session, error) {
+func (c *client) initSession(ctx context.Context, doneCh <-chan interface{}, signingKey sign.PublicKey, linkKey wire.PrivateKey) (net.Conn, *wire.Session, error) {
 	// Connect to the peer.
 	dialFn := c.cfg.DialContextFn
 	if dialFn == nil {
@@ -210,7 +209,8 @@ func (c *client) initSession(ctx context.Context, doneCh <-chan interface{}, sig
 
 	var ad []byte
 	if signingKey != nil {
-		ad = signingKey.Bytes()
+		keyHash := signingKey.Sum256()
+		ad = keyHash[:]
 	}
 
 	// Initialize the wire protocol session.
@@ -244,8 +244,9 @@ func (c *client) initSession(ctx context.Context, doneCh <-chan interface{}, sig
 }
 
 func (c *client) IsPeerValid(creds *wire.PeerCredentials) bool {
-	if !bytes.Equal(c.cfg.PublicKey.Bytes(), creds.AdditionalData) {
-		c.log.Warningf("nonvoting/Client: IsPeerValid(): AD mismatch: %v", hex.EncodeToString(creds.AdditionalData))
+	keyHash := c.cfg.AuthorityIdentityKey.Sum256()
+	if !hmac.Equal(keyHash[:], creds.AdditionalData[:sign.PublicKeyHashSize]) {
+		c.log.Warningf("nonvoting/Client: IsPeerValid(): AD mismatch: got %x != want %x", creds.AdditionalData, keyHash[:])
 		return false
 	}
 	if !c.serverLinkKey.Equal(creds.PublicKey) {
