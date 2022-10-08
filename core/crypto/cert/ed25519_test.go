@@ -21,239 +21,211 @@ import (
 	"testing"
 	"time"
 
-	"github.com/katzenpost/katzenpost/core/crypto/eddsa"
-	"github.com/katzenpost/katzenpost/core/crypto/rand"
-	"github.com/stretchr/testify/assert"
+	"github.com/katzenpost/katzenpost/core/crypto/sign/eddsa"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEd25519ExpiredCertificate(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 
-	ephemeralPrivKey, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
+	signingPrivKey, _ := eddsa.Scheme.NewKeypair()
 
-	signingPrivKey, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
+	message := []byte("hello world")
 
 	// expiration six months ago
 	expiration := time.Now().AddDate(0, -6, 0).Unix()
 
-	certificate, err := Sign(signingPrivKey, ephemeralPrivKey.PublicKey().Bytes(), expiration)
-	assert.Error(err)
-
-	certified, err := Verify(ephemeralPrivKey.PublicKey(), certificate)
-	assert.Error(err)
-	assert.Nil(certified)
+	_, err := Sign(signingPrivKey, message, expiration)
+	require.Error(err)
 }
 
 func TestEd25519Certificate(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 
-	ephemeralPrivKey, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-
-	signingPrivKey, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
+	_, ephemeralPubKey := eddsa.Scheme.NewKeypair()
+	signingPrivKey, signingPubKey := eddsa.Scheme.NewKeypair()
 
 	// expires 600 years after unix epoch
 	expiration := time.Unix(0, 0).AddDate(600, 0, 0).Unix()
 
-	toSign := ephemeralPrivKey.PublicKey().Bytes()
+	toSign := []byte("hello this is a message")
 	certificate, err := Sign(signingPrivKey, toSign, expiration)
-	assert.NoError(err)
+	require.NoError(err)
 
-	mesg, err := Verify(signingPrivKey.PublicKey(), certificate)
-	assert.NoError(err)
-	assert.NotNil(mesg)
-	assert.Equal(mesg, toSign)
+	mesg, err := Verify(signingPubKey, certificate)
+	require.NoError(err)
+	require.NotNil(mesg)
+	require.Equal(mesg, toSign)
+
+	_, err = Verify(ephemeralPubKey, certificate)
+	require.Error(err)
+
 }
 
 func TestEd25519BadCertificate(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 
-	signingPrivKey, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
+	signingPrivKey, signingPubKey := eddsa.Scheme.NewKeypair()
 
 	// expiration in six months
 	expiration := time.Now().AddDate(0, 6, 0).Unix()
-	certified := signingPrivKey.PublicKey().Bytes()
+	certified := signingPubKey.Bytes()
 	certified[3] = 235 // modify the signed data so that the Verify will fail
 
 	certificate, err := Sign(signingPrivKey, certified, expiration)
-	assert.NoError(err)
+	require.NoError(err)
 
-	mesg, err := Verify(signingPrivKey.PublicKey(), certificate)
-	assert.Error(err)
-	assert.Equal(ErrBadSignature, err)
-	assert.Nil(mesg)
+	mesg, err := Verify(signingPubKey, certificate)
+	require.Error(err)
+	require.Equal(ErrBadSignature, err)
+	require.Nil(mesg)
 }
 
 func TestEd25519WrongCertificate(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 
-	ephemeralPrivKey, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-
-	signingPrivKey, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
+	_, ephemeralPubKey := eddsa.Scheme.NewKeypair()
+	signingPrivKey, _ := eddsa.Scheme.NewKeypair()
 
 	// expiration in six months
 	expiration := time.Now().AddDate(0, 6, 0).Unix()
-	certificate, err := Sign(signingPrivKey, ephemeralPrivKey.PublicKey().Bytes(), expiration)
-	assert.NoError(err)
+	message := []byte("hi. i am a message.")
+	certificate, err := Sign(signingPrivKey, message, expiration)
+	require.NoError(err)
 
-	mesg, err := Verify(ephemeralPrivKey.PublicKey(), certificate)
-	assert.Error(err)
-	assert.Nil(mesg)
+	mesg, err := Verify(ephemeralPubKey, certificate)
+	require.Error(err)
+	require.Nil(mesg)
 }
 
 func TestEd25519MultiSignatureCertificate(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 
-	ephemeralPrivKey, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-
-	signingPrivKey1, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-	signingPrivKey2, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-	signingPrivKey3, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
+	signingPrivKey1, signingPubKey1 := eddsa.Scheme.NewKeypair()
+	signingPrivKey2, signingPubKey2 := eddsa.Scheme.NewKeypair()
+	signingPrivKey3, signingPubKey3 := eddsa.Scheme.NewKeypair()
 
 	// expiration in six months
 	expiration := time.Now().AddDate(0, 6, 0).Unix()
 
-	certificate, err := Sign(signingPrivKey1, ephemeralPrivKey.PublicKey().Bytes(), expiration)
-	assert.NoError(err)
+	message := []byte("hello i am a message")
+
+	certificate, err := Sign(signingPrivKey1, message, expiration)
+	require.NoError(err)
 
 	certificate, err = SignMulti(signingPrivKey2, certificate)
-	assert.NoError(err)
+	require.NoError(err)
 
 	certificate, err = SignMulti(signingPrivKey3, certificate)
-	assert.NoError(err)
+	require.NoError(err)
 
-	mesg, err := Verify(signingPrivKey1.PublicKey(), certificate)
-	assert.NoError(err)
-	assert.NotNil(mesg)
+	mesg, err := Verify(signingPubKey1, certificate)
+	require.NoError(err)
+	require.NotNil(mesg)
 
-	mesg, err = Verify(signingPrivKey2.PublicKey(), certificate)
-	assert.NoError(err)
-	assert.NotNil(mesg)
+	mesg, err = Verify(signingPubKey2, certificate)
+	require.NoError(err)
+	require.NotNil(mesg)
 
-	mesg, err = Verify(signingPrivKey3.PublicKey(), certificate)
-	assert.NoError(err)
-	assert.NotNil(mesg)
+	mesg, err = Verify(signingPubKey3, certificate)
+	require.NoError(err)
+	require.NotNil(mesg)
 }
 
 func TestEd25519MultiSignatureOrdering(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 
-	ephemeralPrivKey, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-
-	signingPrivKey1, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-	signingPrivKey2, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-	signingPrivKey3, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
+	signingPrivKey1, _ := eddsa.Scheme.NewKeypair()
+	signingPrivKey2, _ := eddsa.Scheme.NewKeypair()
+	signingPrivKey3, _ := eddsa.Scheme.NewKeypair()
 
 	// expiration in six months
 	expiration := time.Now().AddDate(0, 6, 0).Unix()
 
+	message := []byte("this is a message")
+
 	// 1
-	certificate1, err := Sign(signingPrivKey1, ephemeralPrivKey.PublicKey().Bytes(), expiration)
-	assert.NoError(err)
+	certificate1, err := Sign(signingPrivKey1, message, expiration)
+	require.NoError(err)
 	certificate1, err = SignMulti(signingPrivKey2, certificate1)
-	assert.NoError(err)
+	require.NoError(err)
 	certificate1, err = SignMulti(signingPrivKey3, certificate1)
-	assert.NoError(err)
+	require.NoError(err)
 
 	// 2
-	certificate2, err := Sign(signingPrivKey1, ephemeralPrivKey.PublicKey().Bytes(), expiration)
-	assert.NoError(err)
+	certificate2, err := Sign(signingPrivKey1, message, expiration)
+	require.NoError(err)
 	certificate2, err = SignMulti(signingPrivKey3, certificate2)
-	assert.NoError(err)
+	require.NoError(err)
 	certificate2, err = SignMulti(signingPrivKey2, certificate2)
-	assert.NoError(err)
+	require.NoError(err)
 
-	assert.Equal(certificate1, certificate2)
+	require.Equal(certificate1, certificate2)
 
 	// 3
-	certificate3, err := Sign(signingPrivKey2, ephemeralPrivKey.PublicKey().Bytes(), expiration)
-	assert.NoError(err)
+	certificate3, err := Sign(signingPrivKey2, message, expiration)
+	require.NoError(err)
 	certificate3, err = SignMulti(signingPrivKey3, certificate3)
-	assert.NoError(err)
+	require.NoError(err)
 	certificate3, err = SignMulti(signingPrivKey1, certificate3)
-	assert.NoError(err)
+	require.NoError(err)
 
-	assert.Equal(certificate3, certificate2)
+	require.Equal(certificate3, certificate2)
 }
 
 func TestEd25519VerifyAll(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 
-	ephemeralPrivKey, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-
-	signingPrivKey1, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-	signingPrivKey2, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-	signingPrivKey3, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
+	signingPrivKey1, signingPubKey1 := eddsa.Scheme.NewKeypair()
+	signingPrivKey2, signingPubKey2 := eddsa.Scheme.NewKeypair()
+	signingPrivKey3, signingPubKey3 := eddsa.Scheme.NewKeypair()
 
 	// expiration in six months
 	expiration := time.Now().AddDate(0, 6, 0).Unix()
+	message := []byte("this is a message")
 
-	certificate, err := Sign(signingPrivKey1, ephemeralPrivKey.PublicKey().Bytes(), expiration)
-	assert.NoError(err)
+	certificate, err := Sign(signingPrivKey1, message, expiration)
+	require.NoError(err)
 
 	certificate, err = SignMulti(signingPrivKey2, certificate)
-	assert.NoError(err)
+	require.NoError(err)
 
 	certificate, err = SignMulti(signingPrivKey3, certificate)
-	assert.NoError(err)
+	require.NoError(err)
 
-	verifiers := []Verifier{signingPrivKey1.PublicKey(), signingPrivKey2.PublicKey(), signingPrivKey2.PublicKey()}
+	verifiers := []Verifier{signingPubKey1, signingPubKey2, signingPubKey3}
 	mesg, err := VerifyAll(verifiers, certificate)
-	assert.NoError(err)
-	assert.NotNil(mesg)
+	require.NoError(err)
+	require.NotNil(mesg)
 }
 
 func TestEd25519VerifyThreshold(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 
-	ephemeralPrivKey, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-
-	signingPrivKey1, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-	signingPrivKey2, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-	signingPrivKey3, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-	signingPrivKey4, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
+	signingPrivKey1, signingPubKey1 := eddsa.Scheme.NewKeypair()
+	signingPrivKey2, signingPubKey2 := eddsa.Scheme.NewKeypair()
+	signingPrivKey3, _ := eddsa.Scheme.NewKeypair()
+	signingPrivKey4, signingPubKey4 := eddsa.Scheme.NewKeypair()
 
 	// expiration in six months
 	expiration := time.Now().AddDate(0, 6, 0).Unix()
+	message := []byte("this is a message")
 
-	certificate, err := Sign(signingPrivKey1, ephemeralPrivKey.PublicKey().Bytes(), expiration)
-	assert.NoError(err)
+	certificate, err := Sign(signingPrivKey1, message, expiration)
+	require.NoError(err)
 
 	certificate, err = SignMulti(signingPrivKey2, certificate)
-	assert.NoError(err)
+	require.NoError(err)
 
 	certificate, err = SignMulti(signingPrivKey3, certificate)
-	assert.NoError(err)
+	require.NoError(err)
 
-	verifiers := []Verifier{signingPrivKey1.PublicKey(), signingPrivKey2.PublicKey(), signingPrivKey4.PublicKey()}
+	verifiers := []Verifier{signingPubKey1, signingPubKey2, signingPubKey4}
 	threshold := 2
 	mesg, good, bad, err := VerifyThreshold(verifiers, threshold, certificate)
-	assert.NoError(err)
-	assert.NotNil(mesg)
-	assert.Equal(bad[0].Identity(), signingPrivKey4.Identity())
+	require.NoError(err)
+	require.NotNil(mesg)
+	require.Equal(bad[0].Identity(), signingPrivKey4.Identity())
 	hasVerifier := func(verifier Verifier) bool {
 		for _, v := range good {
 			if bytes.Equal(v.Identity(), verifier.Identity()) {
@@ -262,36 +234,32 @@ func TestEd25519VerifyThreshold(t *testing.T) {
 		}
 		return false
 	}
-	assert.True(hasVerifier(signingPrivKey1.PublicKey()))
-	assert.True(hasVerifier(signingPrivKey2.PublicKey()))
-	assert.False(hasVerifier(signingPrivKey4.PublicKey()))
+	require.True(hasVerifier(signingPubKey1))
+	require.True(hasVerifier(signingPubKey2))
+	require.False(hasVerifier(signingPubKey4))
 }
 
 func TestEd25519AddSignature(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 
-	ephemeralPrivKey, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-
-	signingPrivKey1, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
-	signingPrivKey2, err := eddsa.NewKeypair(rand.Reader)
-	assert.NoError(err)
+	signingPrivKey1, _ := eddsa.Scheme.NewKeypair()
+	signingPrivKey2, signingPubKey2 := eddsa.Scheme.NewKeypair()
 
 	// expiration in six months
 	expiration := time.Now().AddDate(0, 6, 0).Unix()
+	message := []byte("this is message")
 
-	certificate, err := Sign(signingPrivKey1, ephemeralPrivKey.PublicKey().Bytes(), expiration)
-	assert.NoError(err)
+	certificate, err := Sign(signingPrivKey1, message, expiration)
+	require.NoError(err)
 
 	certificate2, err := SignMulti(signingPrivKey2, certificate)
-	assert.NoError(err)
+	require.NoError(err)
 
 	sig, err := GetSignature(signingPrivKey2.Identity(), certificate2)
-	assert.NoError(err)
-	assert.NotNil(sig)
-	certificate3, err := AddSignature(signingPrivKey2.PublicKey(), *sig, certificate)
-	assert.NoError(err)
+	require.NoError(err)
+	require.NotNil(sig)
+	certificate3, err := AddSignature(signingPubKey2, *sig, certificate)
+	require.NoError(err)
 
-	assert.Equal(certificate2, certificate3)
+	require.Equal(certificate2, certificate3)
 }
