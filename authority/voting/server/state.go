@@ -256,7 +256,7 @@ func (s *state) consense(epoch uint64) *document {
 			if !ok {
 				panic(fmt.Sprintf("reverse hash key not found %x", jk[:]))
 			}
-			if ds, err := cert.GetSignature(jk[:], d); err == nil {
+			if ds, err := cert.GetSignature(kjk.Bytes(), d); err == nil {
 				if sc, err := cert.AddSignature(kjk, *ds, c); err == nil {
 					c = sc
 				}
