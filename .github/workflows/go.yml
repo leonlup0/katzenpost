@@ -17,3 +17,38 @@ jobs:
 
       - name: Run all package unit tests
         run: sudo sh -c "ulimit -l 64435 && GORACE=history_size=7 go test -v -timeout 0 ./..."
+  test_e2e:
+    strategy:
+      matrix:
+        go-version: [1.17.x]
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install Go
+        uses: actions/setup-go@v1
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Build nonvoting authority docker image
+        run: |
+          cd docker && make nonvoting_authority
+
+      - name: Build server docker image
+        run: |
+          cd docker && make server
+
+      - name: Fix permissions
+        run: chmod -R og-rwx docker/nonvoting_mixnet/conf
+
+      - name: Start the mixnet
+        run: |
+          cd docker/nonvoting_mixnet && docker-compose --verbose up -d
+
+      - name: run the tests
+        run: sudo sh -c "ulimit -l 64435 && GORACE=history_size=7 go test -tags=docker_test -race -v -run Docker -timeout 60m"
+
+      - name: Stop the mixnet
+        run: |
+          cd docker/nonvoting_mixnet && docker-compose down
